@@ -1,11 +1,11 @@
-# app.py - User Uploads Model, Scaler & Data
+# healthApp.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import pickle          # ← هنا الحل
 import plotly.graph_objects as go
-import os
 
 # ==============================================
 # Page Config
@@ -22,13 +22,13 @@ st.markdown("""
         AI Machine Health Monitor
     </h1>
     <h3 style='text-align: center; color: #666;'>
-        Upload your files and get instant health prediction!
+        Upload your model, scaler & data → Get instant health prediction
     </h3>
     <hr style='border: 3px solid #00BFFF;'>
 """, unsafe_allow_html=True)
 
 # ==============================================
-# Model Architecture (Must match your trained model)
+# Model (يطابق النموذج النهائي بتاعك)
 # ==============================================
 class FinalLSTMHealth(nn.Module):
     def __init__(self):
@@ -46,28 +46,27 @@ class FinalLSTMHealth(nn.Module):
         return self.fc(h_n[-1]) * 100
 
 # ==============================================
-# Sidebar - File Uploads
+# Sidebar Upload
 # ==============================================
-st.sidebar.header("Upload Your Files")
-
+st.sidebar.header("Upload Files")
 uploaded_model  = st.sidebar.file_uploader("Model (.pth)",  type="pth")
 uploaded_scaler = st.sidebar.file_uploader("Scaler (.pkl)", type="pkl")
 uploaded_data   = st.sidebar.file_uploader("Data (.csv)",   type="csv")
 
-if not (uploaded_model and uploaded_scaler and uploaded_data):
-    st.info("Please upload the three files from the sidebar to start.")
+if not all([uploaded_model, uploaded_scaler, uploaded_data]):
+    st.info("Please upload the three files from the sidebar.")
     st.stop()
 
 # ==============================================
-# Load Everything from Uploaded Files
+# Load from uploaded files
 # ==============================================
 @st.cache_resource
-def load_from_upload(model_file, scaler_file, csv_file):
+def load_everything(m_file, s_file, csv_file):
     # Save temporarily
     with open("temp_model.pth", "wb") as f:
-        f.write(model_file.getbuffer())
+        f.write(m_file.getbuffer())
     with open("temp_scaler.pkl", "wb") as f:
-        f.write(scaler_file.getbuffer())
+        f.write(s_file.getbuffer())
 
     # Load model
     model = FinalLSTMHealth()
@@ -84,92 +83,67 @@ def load_from_upload(model_file, scaler_file, csv_file):
 
     return model, scaler, df
 
-with st.spinner("Loading your AI model and data..."):
-    model, scaler, df = load_from_upload(uploaded_model, uploaded_scaler, uploaded_data)
+with st.spinner("Loading model and data..."):
+    model, scaler, df = load_everything(uploaded_model, uploaded_scaler, uploaded_data)
 
-st.success("Files loaded successfully! Ready for prediction")
+st.success("All files loaded successfully!")
 
 # ==============================================
-# Prepare Sequence Function
+# Prepare last 20 rows with features
 # ==============================================
-def get_latest_sequence(machine_df):
-    df_m = machine_df.copy().sort_values('timestamp')
+def get_sequence(machine_df):
+    df_m = machine_df.copy()
     df_m['temp_ma'] = df_m['temperature'].rolling(5, min_periods=1).mean()
     df_m['vib_ma']  = df_m['vibration'].rolling(5, min_periods=1).mean()
     df_m['temp_roc'] = df_m['temperature'].diff().fillna(0)
     df_m['vib_roc']  = df_m['vibration'].diff().fillna(0)
 
-    features = ['temperature','vibration','humidity','pressure','energy_consumption',
-                'temp_ma','vib_ma','temp_roc','vib_roc']
-    return df_m[features].tail(20).values
+    feats = ['temperature','vibration','humidity','pressure','energy_consumption',
+             'temp_ma','vib_ma','temp_roc','vib_roc']
+    return df_m[feats].tail(20).values
 
 # ==============================================
 # Machine Selection
 # ==============================================
-st.sidebar.markdown("---")
-machine_id = st.sidebar.selectbox(
-    "Select Machine ID",
-    options=sorted(df['machine_id'].unique())
-)
+machine_id = st.selectbox("Select Machine ID", sorted(df['machine_id'].unique()))
 
-# ==============================================
-# Predict
-# ==============================================
 machine_data = df[df['machine_id'] == machine_id]
-
 if len(machine_data) < 20:
-    st.error("Not enough data (need at least 20 readings)")
+    st.error("Not enough data (need ≥20 rows)")
     st.stop()
 
-seq_raw = get_latest_sequence(machine_data)
-seq_scaled = scaler.transform(seq_raw)
+seq = get_sequence(machine_data)
+seq_scaled = scaler.transform(seq)
 seq_tensor = torch.tensor(seq_scaled, dtype=torch.float32).unsqueeze(0)
 
+# Predict
 with torch.no_grad():
-    health_score = model(seq_tensor).item()
+    health = model(seq_tensor).item()
 
 # ==============================================
-# Display Results
+# Display
 # ==============================================
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.markdown(f"### Machine {machine_id}")
-    st.metric("Health Score", f"{health_score:.1f}/100", delta=f"{health_score-85:+.1f} from threshold")
-
-    st.progress(health_score / 100)
-
-    if health_score >= 85:
-        st.success("Excellent Condition")
-    elif health_score >= 70:
-        st.warning("Monitor – Plan Maintenance")
+    st.metric("Health Score", f"{health:.1f}/100", delta=f"{health-85:+.1f}")
+    st.progress(health/100)
+    if health >= 85:
+        st.success("Excellent")
+    elif health >= 70:
+        st.warning("Plan Maintenance")
     else:
-        st.error("CRITICAL – Act Now!")
+        st.error("CRITICAL")
 
 with col2:
-    st.markdown("### Health Trend")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=machine_data['timestamp'],
-        y=machine_data['health_score'],
-        mode='lines',
-        name='Health Score',
-        line=dict(color='#00BFFF', width=3)
-    ))
-    fig.add_trace(go.Scatter(
-        x=[machine_data['timestamp'].iloc[-1]],
-        y=[health_score],
-        mode='markers',
-        marker=dict(color='red', size=15, symbol='star'),
-        name='Latest Prediction'
-    ))
+    fig.add_trace(go.Scatter(x=machine_data['timestamp'], y=machine_data['health_score'],
+                              mode='lines', name='Health', line=dict(color='#00BFFF', width=3)))
+    fig.add_trace(go.Scatter(x=[machine_data['timestamp'].iloc[-1]], y=[health],
+                              mode='markers', marker=dict(color='red', size=15, symbol='star'), name='Prediction'))
     fig.add_hline(y=85, line_dash="dash", line_color="orange")
     fig.add_hline(y=70, line_dash="dash", line_color="red")
     fig.update_layout(height=500, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
-# ==============================================
-# Footer
-# ==============================================
-st.markdown("---")
-st.caption("AI Model: 1-Layer LSTM (182 units) | R² > 0.91 | MAE < 0.8 | Built with Streamlit")
+st.success(f"Machine {machine_id} → Health Score: {health:.1f}/100")
