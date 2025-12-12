@@ -1,4 +1,4 @@
-# healthApp.py - النسخة النهائية الشغالة 100% (بدون أي خطأ)
+# healthApp.py - Live Editing + Real-time Prediction + Dynamic Trend
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,21 +14,21 @@ st.set_page_config(page_title="AI Machine Health Monitor", layout="wide", page_i
 
 st.markdown("""
     <h1 style='text-align: center; color: #00BFFF;'>AI Machine Health Monitor</h1>
-    <h3 style='text-align: center; color: #666;'>Upload Model • Scaler • Data → Instant Prediction</h3>
+    <h3 style='text-align: center; color: #888;'>Live Sensor Editing & Real-time Health Prediction</h3>
     <hr style='border: 3px solid #00BFFF;'>
 """, unsafe_allow_html=True)
 
 # ==============================================
-# Model (مطابق للنموذج النهائي بتاعك)
+# Model
 # ==============================================
-class FinalLSTMHealth(nn.Module):
+class LSTMHealth(nn.Module):
     def __init__(self):
-        super(FinalLSTMHealth, self).__init__()  # ← الحل هنا (الشكل الكامل)
-        self.lstm = nn.LSTM(9, 182, num_layers=1, batch_first=True, dropout=0.0)  # dropout=0 لأن num_layers=1
+        super(LSTMHealth, self).__init__()
+        self.lstm = nn.LSTM(9, 128, num_layers=2, batch_first=True, dropout=0.3)
         self.fc = nn.Sequential(
-            nn.Linear(182, 64),
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.217),
+            nn.Dropout(0.3),
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
@@ -39,13 +39,13 @@ class FinalLSTMHealth(nn.Module):
 # ==============================================
 # Sidebar Upload
 # ==============================================
-st.sidebar.header("Upload Your Files")
-uploaded_model  = st.sidebar.file_uploader("1. Model (.pth)", type="pth")
-uploaded_scaler = st.sidebar.file_uploader("2. Scaler (.pkl)", type="pkl")
-uploaded_data   = st.sidebar.file_uploader("3. Data (.csv)", type="csv")
+st.sidebar.header("Upload Files")
+uploaded_model = st.sidebar.file_uploader("Model (.pth)", type="pth")
+uploaded_scaler = st.sidebar.file_uploader("Scaler (.pkl)", type="pkl")
+uploaded_data = st.sidebar.file_uploader("Data (.csv)", type="csv")
 
 if not all([uploaded_model, uploaded_scaler, uploaded_data]):
-    st.info("Please upload all three files from the sidebar.")
+    st.info("Please upload all three files.")
     st.stop()
 
 # ==============================================
@@ -58,7 +58,7 @@ def load_files(m_file, s_file, csv_file):
     with open("temp_scaler.pkl", "wb") as f:
         f.write(s_file.getbuffer())
 
-    model = FinalLSTMHealth()
+    model = LSTMHealth()
     model.load_state_dict(torch.load("temp_model.pth", map_location='cpu'))
     model.eval()
 
@@ -70,24 +70,10 @@ def load_files(m_file, s_file, csv_file):
 
     return model, scaler, df
 
-with st.spinner("Loading model and data..."):
+with st.spinner("Loading..."):
     model, scaler, df = load_files(uploaded_model, uploaded_scaler, uploaded_data)
 
-st.success("Files loaded successfully! Ready for prediction")
-
-# ==============================================
-# Prepare last 20 rows with features
-# ==============================================
-def prepare_sequence(df_machine):
-    df_m = df_machine.copy()
-    df_m['temp_ma'] = df_m['temperature'].rolling(5, min_periods=1).mean()
-    df_m['vib_ma']  = df_m['vibration'].rolling(5, min_periods=1).mean()
-    df_m['temp_roc'] = df_m['temperature'].diff().fillna(0)
-    df_m['vib_roc']  = df_m['vibration'].diff().fillna(0)
-
-    feats = ['temperature','vibration','humidity','pressure','energy_consumption',
-             'temp_ma','vib_ma','temp_roc','vib_roc']
-    return df_m[feats].tail(20).values
+st.success("Loaded successfully!")
 
 # ==============================================
 # Machine Selection
@@ -97,73 +83,103 @@ machine_id = st.selectbox("Select Machine ID", sorted(df['machine_id'].unique())
 machine_data = df[df['machine_id'] == machine_id].copy()
 
 if len(machine_data) < 20:
-    st.error("Not enough data (need at least 20 readings)")
+    st.error("Not enough data")
     st.stop()
 
-# Predict
-seq = prepare_sequence(machine_data)
-seq_scaled = scaler.transform(seq)
-seq_tensor = torch.tensor(seq_scaled, dtype=torch.float32).unsqueeze(0)
+# ==============================================
+# Live Sensor Input (آخر قراءة + تعديل)
+# ==============================================
+st.markdown("### Live Sensor Readings (Edit values and click Predict)")
+last_row = machine_data.iloc[-1]
 
-with torch.no_grad():
-    health_score = model(seq_tensor).item()
+cols = st.columns(5)
+labels = ["Temperature", "Vibration", "Humidity", "Pressure", "Energy Consumption"]
+keys = ['temperature', 'vibration', 'humidity', 'pressure', 'energy_consumption']
+inputs = {}
+
+for col, label, key in zip(cols, labels, keys):
+    with col:
+        default = float(last_row[key])
+        val = st.number_input(label, value=default, step=0.01, format="%.4f", key=key)
+        inputs[key] = val
 
 # ==============================================
-# Display Results
+# Predict Button
 # ==============================================
-col1, col2 = st.columns([1, 2])
+if st.button("Predict Current Health Score", type="primary", use_container_width=True):
+    with st.spinner("Calculating..."):
+        # Build sequence: last 19 historical + 1 new edited
+        hist = machine_data[keys].tail(19).values
+        new = np.array([[inputs[k] for k in keys]])
+        full_seq = np.vstack([hist, new])
 
-with col1:
-    st.markdown(f"### Machine {machine_id}")
-    st.metric("Health Score", f"{health_score:.1f}/100", delta=f"{health_score-85:+.1f}")
-    st.progress(health_score / 100)
+        # Feature engineering
+        df_seq = pd.DataFrame(full_seq, columns=keys)
+        df_seq['temp_ma'] = df_seq['temperature'].rolling(5, min_periods=1).mean()
+        df_seq['vib_ma']  = df_seq['vibration'].rolling(5, min_periods=1).mean()
+        df_seq['temp_roc'] = df_seq['temperature'].diff().fillna(0)
+        df_seq['vib_roc']  = df_seq['vibration'].diff().fillna(0)
 
-    if health_score >= 85:
-        st.success("Excellent Condition")
-    elif health_score >= 70:
-        st.warning("Plan Maintenance")
-    else:
-        st.error("CRITICAL – Immediate Action!")
+        feats = ['temperature','vibration','humidity','pressure','energy_consumption',
+                 'temp_ma','vib_ma','temp_roc','vib_roc']
 
-with col2:
-    st.markdown("### Health Trend (Last 200 Readings - Predicted by Model)")
-    # آخر 200 قراءة للـ Trend (سريع وكافي)
-    N = 200
-    trend_data = machine_data.tail(N).copy()
-    if len(trend_data) >= 20:
-        trend_features = prepare_sequence(trend_data.tail(len(trend_data) - 19))  # adjust to have enough for sliding
-        trend_scaled = scaler.transform(trend_features)
+        X = df_seq[feats].values
+        X_scaled = scaler.transform(X)
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float32).unsqueeze(0)
+
+        with torch.no_grad():
+            health_score = model(X_tensor).item()
+
+        # Predict trend on last 100 readings + new input
+        recent = machine_data.tail(100).copy()
+        recent = pd.concat([recent, pd.DataFrame([inputs], columns=keys)], ignore_index=True)
+
+        recent_features = prepare_features(recent)  # نفس الدالة من قبل
+        recent_scaled = scaler.transform(recent_features.tail(100))
         trend_scores = []
-        timestamps = trend_data['timestamp'].values[19:]
-
-        for i in range(19, len(trend_scaled)):
-            seq = trend_scaled[i-19:i+1]
+        for i in range(19, len(recent_scaled)):
+            seq = recent_scaled[i-19:i+1]
             seq_tensor = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 trend_scores.append(model(seq_tensor).item())
-    else:
-        trend_scores = [health_score] * 5
-        timestamps = machine_data['timestamp'].tail(5).values
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=timestamps,
-        y=trend_scores,
-        mode='lines+markers',
-        name='Health Score',
-        line=dict(color='#00BFFF', width=3)
-    ))
-    fig.add_trace(go.Scatter(
-        x=[timestamps[-1]],
-        y=[health_score],
-        mode='markers',
-        marker=dict(color='red', size=15, symbol='star'),
-        name='Latest'
-    ))
-    fig.add_hline(y=85, line_dash="dash", line_color="orange")
-    fig.add_hline(y=70, line_dash="dash", line_color="red")
-    fig.update_layout(height=500, template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
+        timestamps = recent['timestamp'].tail(len(trend_scores)).values
 
-st.success(f"Machine {machine_id} → Health Score: {health_score:.1f}/100")
-st.caption("Health trend calculated directly from the AI model (last 200 readings)")
+        # Display
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.markdown("### Health Score Result")
+            st.metric("Current Health", f"{health_score:.1f}/100")
+            st.progress(health_score / 100)
+
+            if health_score >= 85:
+                st.success("Excellent Condition")
+            elif health_score >= 70:
+                st.warning("Monitor – Schedule Maintenance")
+            else:
+                st.error("CRITICAL – Immediate Action Required!")
+
+        with col2:
+            st.markdown("### Health Trend (Last 100 Readings + Current Input)")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=timestamps,
+                y=trend_scores,
+                mode='lines+markers',
+                name='Health Trend',
+                line=dict(color='#00BFFF', width=3)
+            ))
+            fig.add_trace(go.Scatter(
+                x=[timestamps[-1]],
+                y=[health_score],
+                mode='markers',
+                marker=dict(color='red', size=15, symbol='star'),
+                name='Current Prediction'
+            ))
+            fig.add_hline(y=85, line_dash="dash", line_color="orange", annotation_text="Warning")
+            fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Critical")
+            fig.update_layout(height=500, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+
+st.caption("Edit sensor values and click Predict to see real-time impact on machine health")
